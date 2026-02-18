@@ -1,3 +1,13 @@
+# Ignore large data files
+data/
 *.csv
-FD_SALAAN_2021_csv/
+*.zip
+*.7z
+
+# Ignore Python/Anaconda environment files
+.anaconda3/
+__pycache__/
 .DS_Store
+
+# Ignore local notebook checkpoints
+.ipynb_checkpoints/
