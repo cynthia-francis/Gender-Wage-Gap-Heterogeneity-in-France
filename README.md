@@ -1,6 +1,6 @@
 # Gender Wage Gap Heterogeneity in France (2021)
 
-This project was developed as part of the **"Machine Learning for Econometrics"** course. It aims to analyze gender wage disparities in France in 202 using high-dimensional controls and causal inference techniques.
+This project was developed as part of the **"Machine Learning for Econometrics"** course. It aims to analyze gender wage disparities in France in 2021 using high-dimensional controls and causal inference techniques.
 
 ## 👥 The Team
 * Vladislava Anashkina
