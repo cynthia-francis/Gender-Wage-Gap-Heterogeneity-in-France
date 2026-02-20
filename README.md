@@ -24,4 +24,5 @@ We use the 2021 "Bases Tous salariés" dataset to identify the "unexplained" gen
 │   └── Model.ipynb # Post-Lasso & DoubleML implementation
 ├── docs            # Research papers 
 ├── README.md
+└── .gitattributes
 └── .gitignore
