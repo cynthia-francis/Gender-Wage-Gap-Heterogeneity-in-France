@@ -1,0 +1,511 @@
+---
+title: "causal_forest"
+output: html_document
+date: "2026-03-07"
+---
+
+# Estimating Heterogeneous Gender Wage Gaps Non-Parametrically with Causal Forests
+
+Causal Forest is a tree-based approach to estimating CATEs. It was developed through several papers by Athey, Wager and co-authors (Athey & Imbens, 2016; Wager & Athey, 2018; Nie & Wager, 2020; Athey et al., 2019). Its estimates are asymptotically unbiased and normal.
+
+Causal forest removes confounding with nuisance models, fits a model to cluster observations with treatment effect heterogeneity to form an adaptive kernel and then it estimates out treatment effects within each kernel bandwidth. For this, it uses three models: a nuisance model that predicts treatment, a nuisance model that predicts outcome and finally a model of treatment effect heterogeneity. These nuisance models are normally regression forests that can be used to partial out selection effects and obtained the residualised treatment and outcome variable. $$
+\check{Y} = Y - \hat{m}(x), \qquad
+\check{D} = D - \hat{e}(x)
+$$ The final heterogeneity model is a random forest made up of causal trees (Athey & Imbens, 2016). Firstly, they use a splitting criterion that maximises treatment effect heterogeneity. Secondly they are ’honest’, meaning each tree uses typically half of its sample to split the tree and the other half to make estimates for each terminal node. This prevents over-fitting, giving asymptotically normal predictions out of each tree. The overall ensemble these fit into is trained as an R-Learner meta-learner (Nie & Wager, 2020).
+
+Causal forest uses the ensemble as an adaptive kernel, finding weights to calculate treatment effects for neighbourhoods in a high-dimensional covariate space. We find the weights for a covariate set x by looking through each data-point i and finding the proportion of trees that were not fit on Xi (to prevent overfitting) for which Xi and x fall into the same leaf.
+
+$$
+\alpha_i(x) =
+\frac{1}{B}
+\sum_{b=1}^{B}
+\frac{\mathbb{1}(\{X_i \in L_b(x), i \in \mathcal{S}_b\})}
+{|\{i : X_i \in L_b(x), i \in \mathcal{S}_b\}|}
+$$
+
+In order to estimate treatment effects, it uses a weighted version of Robinson’s transformation as proposed by Athey et al. (2019). They are the solution to the following equation : $$
+\sum_{i=1}^{n}
+\alpha_i(x)
+(\check{Y}_i - \tau(x)\check{D}_i)\check{D}_i = 0
+$$
+
+Standard errors can be calculated via a bootstrap of little bags. This is done by dividing trees into small subforests, each of them built on different subsamples and estimating prediction variance across these subforests.
+
+## Non-Parametric Estimation of Heterogeneous Gender Wage Gaps
+
+This notebook expores heterogeneity in the gender wage gap in France. It estimates conditional average treatment effect of being a women on log wages across the covariate space using a causal forest. Thecovariates include the number of hours worked, the contract duration, age, region, sector, socio-professional categories and type of contract.
+
+## Set up
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = 'asis')
+```
+
+```{r Load Packages, echo=TRUE}
+library(readr)
+library(dplyr)
+library(grf) 
+library(ggplot2)
+library(xtable)
+library(purrr)
+```
+
+```{r Load the data}
+data_bach <- read_csv("https://media.githubusercontent.com/media/AnahiRM/Gender-Wage-Gap-Heterogeneity-in-France/refs/heads/main/data/processed/sample_dataset.csv" )
+data_bach <- data_bach %>% 
+  filter(y<10.3889953683178) %>% # Filter highest incomes due to discontinuities in data
+  mutate(CS=as.factor(CS), REGR=as.factor(REGR))
+```
+
+```{r Dictionaries for Vars Labels, include=FALSE}
+# A6: Industry Classification
+A6_map <- c(
+  "AZ" = "Agri/Forest/Fish",
+  "BE" = "Manuf/Mining/Energy",
+  "FZ" = "Construction",
+  "GI" = "Trade/Transp/Hospit",
+  "JU" = "Misc Services",
+  "OQ" = "Public Admin/Edu/Health"
+)
+
+# REGR: Region
+REGR_map <- c(
+  "1" = "Guadeloupe",
+  "2" = "Martinique",
+  "3" = "French Guiana",
+  "4" = "Reunion",
+  "11" = "Ile-de-France",
+  "24" = "Centre-Val de Loire",
+  "27" = "Bourgogne-Franche-Comte",
+  "28" = "Normandy",
+  "32" = "Hauts-de-France",
+  "44" = "Grand Est",
+  "52" = "Pays de la Loire",
+  "53" = "Brittany",
+  "75" = "Nouvelle-Aquitaine",
+  "76" = "Occitanie",
+  "84" = "Auvergne-Rhone-Alpes",
+  "93" = "PACA",
+  "94" = "Corsica",
+  "99" = "Abroad/Overseas"
+)
+
+# CONT_TRA: Contract Type
+CONT_TRA_map <- c(
+  "CDI" = "Permanent",
+  "CDD" = "Fixed-term"
+)
+
+# CS: Socioprofessional Category
+CS_map <- c(
+  "10" = "Farmers (salaried)",
+  "21" = "Artisans (salaried)",
+  "22" = "Shopkeepers (salaried)",
+  "23" = "Biz Owners (10+ empl)",
+  "31" = "Self-empl Professionals",
+  "33" = "Public Serv Managers",
+  "34" = "Professors/Scientists",
+  "35" = "Arts/Media/Info",
+  "37" = "Biz Admin/Sales Mgrs",
+  "38" = "Eng/Tech Managers",
+  "42" = "School Teachers",
+  "43" = "Health/Social Intermed",
+  "44" = "Clergy/Religious",
+  "45" = "Public Admin Intermed",
+  "46" = "Biz Admin/Sales Intermed",
+  "47" = "Technicians",
+  "48" = "Foremen/Supervisors",
+  "52" = "Public Serv Employees",
+  "53" = "Security Agents",
+  "54" = "Biz Admin Employees",
+  "55" = "Retail Employees",
+  "56" = "Personal Serv Staff",
+  "62" = "Skilled Indust Workers",
+  "63" = "Skilled Craft Workers",
+  "64" = "Drivers",
+  "65" = "Skilled Transp/Storage",
+  "67" = "Unskilled Indust Workers",
+  "68" = "Unskilled Craft Workers",
+  "69" = "Agri Workers"
+)
+all_labels <- c(
+  # --- Industry (A6) ---
+  "A6AZ" = "Agri/Forest/Fish",
+  "A6BE" = "Manuf/Mining/Energy",
+  "A6FZ" = "Construction",
+  "A6GI" = "Trade/Transp/Hospit",
+  "A6JU" = "Misc Services",
+  "A6OQ" = "Public Admin/Edu/Health",
+
+  # --- Regions (REGR) ---
+  "REGR1" = "Guadeloupe", "REGR2" = "Martinique", "REGR3" = "French Guiana", "REGR4" = "Reunion",
+  "REGR11" = "Ile-de-France", "REGR24" = "Centre-Val de Loire", "REGR27" = "Bourgogne-Franche-Comte",
+  "REGR28" = "Normandy", "REGR32" = "Hauts-de-France", "REGR44" = "Grand Est", 
+  "REGR52" = "Pays de la Loire", "REGR53" = "Brittany", "REGR75" = "Nouvelle-Aquitaine",
+  "REGR76" = "Occitanie", "REGR84" = "Auvergne-Rhone-Alpes", "REGR93" = "PACA", 
+  "REGR94" = "Corsica", "REGR99" = "Abroad/Overseas",
+
+  # --- Contract Type (CONT_TRA) ---
+  "CONT_TRACDI" = "Permanent",
+  "CONT_TRACDD" = "Fixed-term",
+
+  # --- Socioprofessional (CS) ---
+  "CS10" = "Farmers (salaried)", "CS21" = "Artisans (salaried)", 
+  "CS22" = "Shopkeepers (salaried)", "CS23" = "Biz Owners (10+ empl)",
+  "CS31" = "Self-empl Professionals", "CS33" = "Public Serv Managers",
+  "CS34" = "Professors/Scientists", "CS35" = "Arts/Media/Info",
+  "CS37" = "Biz Admin/Sales Mgrs", "CS38" = "Eng/Tech Managers",
+  "CS42" = "School Teachers", "CS43" = "Health/Social Intermed",
+  "CS44" = "Clergy/Religious", "CS45" = "Public Admin Intermed",
+  "CS46" = "Biz Admin/Sales Intermed", "CS47" = "Technicians",
+  "CS48" = "Foremen/Supervisors", "CS52" = "Public Serv Employees",
+  "CS53" = "Security Agents", "CS54" = "Biz Admin Employees",
+  "CS55" = "Retail Employees", "CS56" = "Personal Serv Staff",
+  "CS62" = "Skilled Indust Workers", "CS63" = "Skilled Craft Workers",
+  "CS64" = "Drivers", "65" = "Skilled Transp/Storage",
+  "CS67" = "Unskilled Indust Workers", "CS68" = "Unskilled Craft Workers",
+  "CS69" = "Agri Workers"
+)
+```
+
+## Estimating Gender Wage Gap
+
+### Training Casual Forest
+
+We train a causal forest using as treatment variable female. Given the descriptive rather than predictive nature of the analysis, no train test split is done to train the model.
+
+```{r Build Model Inputs}
+# Covariates
+X_grf <- model.matrix(
+  ~ -1
+  + NBHEUR + DUREE + AGE + REGR  +
+    A6 + CS + CONT_TRAV, 
+  data = data_bach
+)
+X_grf <- X_grf[, which(apply(X_grf, 2, var) != 0)] # exclude all constant variables
+
+# Treatment 
+D <- data_bach$female==1
+
+# Outcome
+Y_grf <- data_bach$y
+
+
+dim(X_grf)
+
+```
+
+Our final sample contains 463882 subjects and 55 covariates.
+
+```{r Run CF}
+cf <- causal_forest(
+  X = X_grf,
+  Y = Y_grf,
+  W = D,
+  num.trees = 1000,
+  num.threads = 16            
+)
+#saveRDS(cf, "my_causal_forest.rds") # Save causal forest as n R object for later use
+```
+
+The grf package allows a direct estimation of both ATE effects as well as to individual estimates of the gender wage gap in the sample.
+
+### ATE Estimations
+
+We estimate first the average gender effects on wages tryingseveral estimation methods and samples to check the robustness of the estimate. Methods include augmented inverse probability weighting and targeted maximum likelihood estimation. We run both methods on the whole sample as well as on the overlapping sample.
+
+```{r ATE Estimation, echo=FALSE, message=FALSE, warning=FALSE}
+#cf <- readRDS("my_causal_forest.rds")
+# Predict multiple ATEs 
+average_treatment_effect(cf)
+ate_aipw <- average_treatment_effect(cf, method = "AIPW", target.sample = "all")
+ate_tmle <- average_treatment_effect(cf, method = "TMLE", target.sample = "all")
+
+# Predict ATE overlap
+ate_aipw_overl <- average_treatment_effect(cf, method = "AIPW", target.sample = "overlap")
+ate_tmle_overl <- average_treatment_effect(cf, method = "TMLE", target.sample = "overlap")
+
+```
+
+```{r ATE Estimation 2, echo=TRUE, message=FALSE, warning=FALSE}
+
+cat("---AIPW (Augmented Inverse Probability Weighting):---\n")
+print(ate_aipw)
+
+cat("\n---TMLE (Targeted Maximum Likelihood Estimation):---\n")
+print(ate_tmle)
+
+cat("\n--- Overlap Weighted Estimators  ---\n")
+cat("AIPW with Overlap Weights:\n")
+print(ate_aipw_overl)
+
+cat("\nTMLE with Overlap Weights:\n")
+print(ate_tmle_overl)
+```
+
+The estimated wage gap in the sample is around 3.8% and 4.3%, with the lower estimates found in the overlapped sample.
+
+### Individual Gender Wage Gap Estimates
+
+We then obtain individual predictions of gender wage gaps in the sample.
+
+```{r Individual CATE Estimates, echo=TRUE, message=FALSE, warning=FALSE}
+predictions <-  predict(cf, X_grf, estimate.variance=TRUE)
+tau_hat <- predictions$predictions
+standard.error <-  sqrt(predictions$variance.estimates)
+
+hist(tau_hat)
+
+```
+
+The histogram suggests individual gender wage gap estimates are considerably well behaved, with higher density in negative estimates.
+
+## Gender Wage Gap Heterogeneity
+
+This section analyzes what individual estimates reveal of gender wage gap heterogeneities. We first plot ranked estimates.
+
+```{r Ranked Individual Estimates Plot, echo=TRUE, message=FALSE, warning=FALSE}
+df <- data.frame(
+  tau_hat = tau_hat,
+  se = standard.error
+)
+# CI bounds
+df$upper <- df$tau_hat + 1.96 * df$se
+df$lower <- df$tau_hat - 1.96 * df$se
+
+
+df$percentile <- rank(df$upper) # rank acc. upper bound
+
+df$is_significant <- df$upper < 0 # identify significant estimates
+# Plot
+ggplot(df, aes(x = percentile, y = tau_hat)) +
+     geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3) +
+      geom_point(color = "navy") + 
+      geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+       labs(x = "Rank of Individual Effect", y = "Estimated Wage Gap (CATE)") +
+       theme_minimal() + 
+  labs(x = "Ranked Individual Effect", 
+                y = "Estimated Wage Gap (CATE)", 
+                title = "CATE Effects with 95% Confidence Interval") +
+
+   theme(
+         plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        axis.title = element_text(size = 12),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank()   )
+```
+
+This figure shows that significant heterogeneity in gender wage gap exists in France. In particular, 58.58% of the sample has an estimated gender wage gap significantly below zero at the 0.05 significance level. The remaining 41.42% do not present a statistically different from zero gender pay gap.
+
+### Feature Importance : Understanding Drivers of Heterogeneity
+
+We analyze covariates contributions to explaining heterogeneity in the gender pay gap. These do not correspond to the predictors of gap but rather the factors that differentiate groups of individuals which are similar in the estimated gap and different from others.
+
+```{r Feature Importance, echo=TRUE, message=FALSE, warning=FALSE}
+vars <- colnames(X_grf) # Keep var names
+
+# Run feature importance
+var_importance <- variable_importance(cf)
+rownames(var_importance) <- vars # Recover var names
+# Format data
+feature_importance <- data.frame(Variable=rownames(var_importance), Importance=as.numeric(var_importance[,1]) )
+
+feature_importance <- feature_importance %>% 
+  filter(Importance>0) %>% 
+  arrange(desc(Importance))
+print(feature_importance)
+```
+
+```{r Plot Feature Importance , echo=TRUE, message=FALSE, warning=FALSE}
+feature_plot_data <- feature_importance %>%
+  filter(Importance > 0.009) %>% # Filter most important variables
+  arrange(desc(Importance)) 
+
+# Rename variables
+feature_plot_data <- feature_plot_data %>% 
+  mutate(Variable = ifelse(Variable %in% names(all_labels), 
+                           all_labels[Variable], 
+                           Variable))
+
+#  Create the Importance Plot
+ggplot(feature_plot_data, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_col(fill = "steelblue") + # Bars are better for importance (non-negative)
+  coord_flip() +
+  labs(
+    title = "Variable Importance in Causal Forest",
+    subtitle = "Features with importance > 0.009",
+    x = "Covariate",
+    y = "Importance Score"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(size = 9)
+  )
+
+
+```
+
+Feature importance analysis suggests that socio-professional categories and industry play a primary role in explaining heterogeneity. In particular, skilled industrial workers and health and social workers appear as the two top drivers of gender wage gap heterogeneity. Manufacturing industry and working in public administration/health and education follow. Factors relating to people's career and experience, including hours of work and age, appear relevant as well. Finally, some geographical patterns emerge with two regions, Île de France and Pays de la Loire, contributing to explaining heterogeneous dynamics.
+
+### Gender Wage Gap Across Relevant Categories
+
+In this section, we explore descriptively how the estimated wage gap vary across covariates.
+
+```{r Plot Average Estimate by Categories, echo=TRUE, message=FALSE, warning=FALSE}
+data_bach$tau <- predictions$predictions # Add predictions to the main dataset
+cat_vars <- c("CS", "A6", "REGR")
+
+# Rename variables
+data_bach <- data_bach %>%
+  mutate(
+    A6       = recode(A6, !!!A6_map),
+    REGR     = recode(REGR, !!!REGR_map),
+    CONT_TRAV = recode(CONT_TRAV, !!!CONT_TRA_map),
+    CS       = recode(CS, !!!CS_map)
+  )
+
+# Loop through categorical variables, plot mean estimate by category 
+plots <- map(cat_vars, function(var) {
+  
+  summary_df <- data_bach %>%
+    group_by(across(all_of(var))) %>%
+    summarise(mean_tau = mean(tau, na.rm = TRUE)) %>%
+    ungroup()
+
+
+  
+  p <- ggplot(summary_df, aes(x = reorder(!!sym(var), mean_tau), y = mean_tau)) +
+    geom_segment(aes(xend = !!sym(var), y = 0, yend = mean_tau), color = "skyblue", size = 1.2) +
+    geom_point(color = "blue", size = 3) +
+    coord_flip() +
+    labs(x = var, y = expression(hat(tau)), title = paste("Mean tau by", var)) +
+    theme_minimal()
+  
+  return(p)
+})
+```
+
+```{r Print Plots, echo=TRUE, message=FALSE, warning=FALSE}
+plots
+
+```
+
+-   **Socioprofessional category :** The only two categories in which women present, on average, an advantage is those women working in health and social sectors (2.12%) and public service employees (+1.4%). Women are particularly penalized in traditionally masculine categories in industry and manufacturing oriented sectors\`(i.e., -8.85% in skilled industrial works). On average, the disadvantage that women face across socioprofessional categories is larger than any advantage they might enjoy.
+
+-   **Sector:** across all sectors, on average, women earn less than comparable men. The largest gaps appear in works in the secondary sector such as manufacturing (-6.56%), construction (-6.29%), agricultural (-4.32%) and trade and transports (-4.31%). The gap is significantly lower in the service sectors (-0.353% in public administration, education and health and -2.56% in misc services).
+
+-   **Regions :** Gender wage gaps present relatively similar magnitudes across the French territory with the exception of the Île de France and Pays de la Loire regions, which present the lowest (-1.78%) and highest (-5.44%) estimated average gender wage gap.
+
+```{r Ploting numerical variables}
+num_vars <- c("AGE", "NBHEUR")
+
+# Loop through numeric variables and plot scatter plot
+plots_num <- map(num_vars, function(var) {
+  
+  p <- ggplot(data_bach, aes(x = !!sym(var), y = tau)) +
+    geom_point(color = "darkorange", alpha = 0.6) +
+    geom_smooth(method = "lm", se = TRUE, color = "blue") +
+    labs(
+      x = var,
+      y = expression(tau),
+      title = paste("Scatter plot of tau vs", var)
+    ) +
+    theme_minimal()
+  
+  return(p)
+})
+```
+
+```{r PLOT, echo=TRUE, warning=FALSE, message=FALSE}
+plots_num
+```
+
+When it comes to hours of work and wage, no clear trend seems to emerge.
+
+### Best Linear Projections : Gender Wage Gap in the Covariate Space
+
+Finally, in this section we analyze the covariates contributions to explaining the gender wage gap using best linear projections. We project the estimated wage gaps into the covariate space to obtain interpretable coefficients that can, in addition, be compared to those obtained by the double lasso.
+
+```{r Best Linear Projections, echo=TRUE, message=FALSE, warning=FALSE}
+# Run best linear projections
+coeffs <- best_linear_projection(cf, A=X_grf, vcov.type="HC0")
+print(coeffs)
+```
+
+Reference categories :
+
+-   Sector: Agriculture
+
+-   Region : Foreign
+
+-   Socioprofessional category: Agriculture worker
+
+-   Contract: CDD
+
+```{r Export Table, echo=TRUE, message=FALSE, warning=FALSE}
+# Convert to xtable and export
+coef_mat_cf <- coeffs
+pvals <- coef_mat_cf[,4]
+
+stars <- ifelse(pvals < 0.01, "***",
+                ifelse(pvals < 0.05, "**",
+                       ifelse(pvals < 0.1, "*", "")))
+
+estimates_with_stars_cf <- paste0(
+  sprintf("%.3f", coef_mat_cf[,1]),
+  stars
+)
+full_table_cf <- data.frame(
+  Variable = rownames(coef_mat_cf),
+  Estimate  = sprintf("%.3f",coef_mat_cf[,1]),
+  Std.Error = sprintf("%.3f", coef_mat_cf[,2]),
+  t.value   = sprintf("%.3f", coef_mat_cf[,3]),
+  p.value   = sprintf("%.3f", coef_mat_cf[,4])
+)
+xt_cf <- xtable(full_table_cf)
+
+print(xt_cf,
+      type = "latex",
+      file = "cf_full_table.tex",
+      include.rownames = TRUE,
+      sanitize.text.function = identity,  # IMPORTANT for stars
+      booktabs = TRUE)
+
+
+```
+
+```{r Plot Best Linear Projections, echo=TRUE, message=FALSE, warning=FALSE}
+#  Convert the grf output to a data frame for plotting
+full_table_cf <- full_table_cf %>% 
+  mutate(Estimate=as.numeric(Estimate), Std.Error=as.numeric(Std.Error), t.value=as.numeric(t.value), p.value=as.numeric(p.value))
+
+# Filter for significant coefficients
+significant_coeffs <- full_table_cf %>% 
+  filter(p.value<0.1)
+
+#  Rename variables
+significant_coeffs <- significant_coeffs %>% 
+  mutate(Variable = ifelse(Variable %in% names(all_labels), 
+                           all_labels[Variable], 
+                           Variable))
+
+
+#  Create the plot
+ggplot(significant_coeffs, aes(x = reorder(Variable, Estimate), y = Estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_point(color = "#2c3e50", size = 3) +
+  geom_errorbar(aes(ymin = Estimate - 1.96 * Std.Error, 
+                    ymax = Estimate + 1.96 * Std.Error), 
+                width = 0.2, color = "#2c3e50") +
+  coord_flip() +
+  labs(
+    title = "Significant Predictors of Gender Wage Gap and 95% CI",
+    subtitle = "Significant Covariates at 10% from Best Linear Projection",
+    x = "Covariate",
+    y = "Coefficient Estimate"
+  ) +
+  theme_minimal()
+```
+
+We plot exclusively those coefficients with a statistically significant contribution at 0.1 significance value, with their 95% confidence interval. Overall, the results suggests that industry and socioprofessional category are the most relevant predictors of gender wage gap. Relative to the agricultural sector, the results suggest working in high-skilled, creative, service- and care-oriented sectors as well as in the public administration reduces the gender wage gap, other things constant. Number of hours worked seem to play no role. Interestingly, having a 'CDI' is associated with increased gender pay gap.
