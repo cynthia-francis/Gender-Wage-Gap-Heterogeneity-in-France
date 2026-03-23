@@ -19,10 +19,14 @@ We use the 2021 "Bases Tous salariés" dataset to identify the "unexplained" gen
 ├── data
 │   ├── raw         # Original FD_SALAAN_2021.csv (Stored via Git LFS)
 │   └── processed   # Cleaned sample_dataset.csv for modeling
-├── notebooks
-│   ├── EDA.ipynb   # Exploratory Data Analysis & Causal Graph
-│   └── Model.ipynb # Post-Lasso & DoubleML implementation
 ├── docs            # Research papers 
-├── README.md
+├── notebooks
+│   ├── causal_forest_V1.html # Rendered HTML report of Causal Forest
+│   ├── causal_forest_V1.Rmd # Causal Forest R implementation
+│   └── cf_full_table.tex    # Exported LaTeX results table
+│   ├── EDA.ipynb            # Exploratory Data Analysis & Causal Graph
+│   ├── Metalearners.ipynb   # Metalearners notebook
+│   ├── VA_Replication.ipynb # Post-Lasso Replication notebook
 └── .gitattributes
 └── .gitignore
+├── README.md
